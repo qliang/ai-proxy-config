@@ -63,15 +63,6 @@ proxy-groups:
     use:
       - residential
 
-  - name: AI
-    type: select
-    proxies:
-      - 手动选择
-      - 自动选择
-      - DIRECT
-    use:
-      - residential
-
 rule-providers:
   advertising:
     type: http
@@ -115,7 +106,6 @@ rule-providers:
 
 rules:
   - RULE-SET,advertising,REJECT
-  - RULE-SET,ai,AI
   - RULE-SET,proxy,手动选择
   - RULE-SET,lan,DIRECT
   - RULE-SET,cn,DIRECT

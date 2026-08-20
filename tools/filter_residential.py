@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """Filter Clash proxies to residential IPs; emit Shadowrocket sub + Clash Meta config.
 
-Classifies the **entry** server IP via ip-api.com (same hosting/proxy flags as
-refer/claude_check.py). Relay/transit nodes are often datacenter even if the
-name says 家宽 — that is expected.
+  python tools/filter_residential.py
 
-  python tools/filter_residential.py refer/clash_simple.yaml refer/clash_full.yaml
+Reads refer/proxy_select/*.yaml (IP-filtered) and refer/proxy_fix/*.yaml (kept as-is).
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import ipaddress
 import json
 import re
@@ -30,6 +29,7 @@ except ImportError:
     sys.exit("需要 PyYAML：pip install -r requirements.txt")
 
 ROOT = Path(__file__).resolve().parents[1]
+TEMPLATE_PATH = ROOT / "clash" / "ai.yaml"
 CACHE_PATH = ROOT / ".cache" / "ip-api.json"
 IP_API_URL = (
     "http://ip-api.com/json/{ip}"
@@ -40,6 +40,10 @@ SKIP_NAME = re.compile(r"(剩余流量|套餐到期|expire|traffic|过期|到期
 STRIP_EMOJI = re.compile(
     r"[\U0001F1E6-\U0001F1FF]|[\U0001F300-\U0001FAFF]|[\u2600-\u27BF]|[\uFE0F]"
 )
+XHTTP_TAG = re.compile(r"\[vless reality xhttp\]", re.I)
+VLESS_TAG = re.compile(r"\[vless reality (?:xhttp|tcp)\]", re.I)
+SELECT_DIR = ROOT / "refer" / "proxy_select"
+FIX_DIR = ROOT / "refer" / "proxy_fix"
 
 
 def load_cache() -> dict:
@@ -66,6 +70,7 @@ def load_proxies(path: Path) -> list[dict]:
         if isinstance(p, dict) and p.get("server") and p.get("type"):
             p = dict(p)
             p["_source"] = path.name
+            p["_stem"] = path.stem
             out.append(p)
     return out
 
@@ -122,17 +127,37 @@ def classify(info: dict) -> str:
     return "residential"
 
 
-def name_snippet(name: str, limit: int = 16) -> str:
-    s = STRIP_EMOJI.sub("", name or "")
-    s = s.replace("|", "-").replace("/", "-")
+def iter_yaml_files(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return sorted(
+        [p for p in directory.iterdir() if p.suffix.lower() in {".yaml", ".yml"} and p.is_file()]
+    )
+
+
+def is_xhttp(p: dict) -> bool:
+    name = str(p.get("name") or "")
+    if XHTTP_TAG.search(name):
+        return True
+    if str(p.get("network") or "").lower() == "xhttp":
+        return True
+    return bool(p.get("xhttp-opts"))
+
+
+def name_snippet(name: str, limit: int = 12) -> str:
+    s = VLESS_TAG.sub("", name or "")
+    s = STRIP_EMOJI.sub("", s)
+    s = s.replace("|", "-")
     s = re.sub(r"\s+", "", s)
-    s = re.sub(r"^-+|-+$", "", s)
+    s = s.strip("-")
+    parts = [part for part in s.split("-") if part]
+    s = "-".join(parts[:2]) if parts else "node"
     return s[:limit] if s else "node"
 
 
-def new_label(country: str, seq: int, original: str) -> str:
+def new_label(country: str, seq: int, filename: str, original: str) -> str:
     snippet = name_snippet(original)
-    return f"{country}-{seq:02d}-{snippet}"
+    return f"{country}{seq:02d}-{filename}-{snippet}"
 
 
 def q(value) -> str:
@@ -145,112 +170,49 @@ def clash_proxy(p: dict, name: str) -> dict:
     return out
 
 
-def build_clash_config(proxies: list[dict]) -> dict:
+def load_clash_template(path: Path = TEMPLATE_PATH) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"找不到 Clash 模板: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Clash 模板无效: {path}")
+    return data
+
+
+def build_clash_config(proxies: list[dict], template_path: Path = TEMPLATE_PATH) -> dict:
+    """Load clash/ai.yaml and splice filtered proxies into a standalone profile."""
+    cfg = load_clash_template(template_path)
     names = [p["name"] for p in proxies]
-    select_list = names + ["DIRECT"] if names else ["DIRECT"]
-    auto_list = names or ["DIRECT"]
-    return {
-        "mixed-port": 7890,
-        "allow-lan": False,
-        "bind-address": "*",
-        "mode": "rule",
-        "log-level": "info",
-        "ipv6": False,
-        "external-controller": "127.0.0.1:9090",
-        "tun": {
-            "enable": True,
-            "stack": "mixed",
-            "dns-hijack": ["any:53"],
-            "auto-route": True,
-            "auto-detect-interface": True,
-        },
-        "dns": {
-            "enable": True,
-            "ipv6": False,
-            "enhanced-mode": "fake-ip",
-            "fake-ip-range": "198.18.0.1/16",
-            "use-hosts": True,
-            "nameserver": [
-                "223.5.5.5",
-                "119.29.29.29",
-                "https://dns.alidns.com/dns-query",
-            ],
-            "fallback": ["8.8.8.8", "1.1.1.1", "https://1.1.1.1/dns-query"],
-            "fallback-filter": {
-                "geoip": True,
-                "geoip-code": "CN",
-                "ipcidr": ["240.0.0.0/4"],
-            },
-        },
-        "proxies": proxies,
-        "proxy-groups": [
-            {"name": "手动选择", "type": "select", "proxies": select_list},
-            {
-                "name": "自动选择",
-                "type": "url-test",
-                "url": "https://www.gstatic.com/generate_204",
-                "interval": 300,
-                "tolerance": 50,
-                "proxies": auto_list,
-            },
-            {
-                "name": "AI",
-                "type": "select",
-                "proxies": ["手动选择", "自动选择", "DIRECT"] + names,
-            },
-        ],
-        "rule-providers": {
-            "advertising": {
-                "type": "http",
-                "behavior": "domain",
-                "format": "text",
-                "url": "https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/AdvertisingLite/AdvertisingLite_Domain.txt",
-                "path": "./ruleset/advertising.txt",
-                "interval": 86400,
-            },
-            "ai": {
-                "type": "http",
-                "behavior": "classical",
-                "format": "yaml",
-                "url": "https://cdn.jsdelivr.net/gh/VPSDance/ai-proxy-rules@main/rules/clash/global.yaml",
-                "path": "./ruleset/ai.yaml",
-                "interval": 86400,
-            },
-            "proxy": {
-                "type": "http",
-                "behavior": "classical",
-                "format": "yaml",
-                "url": "https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/Global/Global.yaml",
-                "path": "./ruleset/global.yaml",
-                "interval": 86400,
-            },
-            "lan": {
-                "type": "http",
-                "behavior": "classical",
-                "format": "yaml",
-                "url": "https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/Lan/Lan.yaml",
-                "path": "./ruleset/lan.yaml",
-                "interval": 86400,
-            },
-            "cn": {
-                "type": "http",
-                "behavior": "classical",
-                "format": "yaml",
-                "url": "https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/China/China.yaml",
-                "path": "./ruleset/china.yaml",
-                "interval": 86400,
-            },
-        },
-        "rules": [
-            "RULE-SET,advertising,REJECT",
-            "RULE-SET,ai,AI",
-            "RULE-SET,proxy,手动选择",
-            "RULE-SET,lan,DIRECT",
-            "RULE-SET,cn,DIRECT",
-            "GEOIP,CN,DIRECT",
-            "MATCH,手动选择",
-        ],
-    }
+    cfg.pop("proxies", None)
+    ordered = {}
+    inserted = False
+    for key, value in cfg.items():
+        if key == "proxy-groups" and not inserted:
+            ordered["proxies"] = proxies
+            inserted = True
+        ordered[key] = value
+    if not inserted:
+        ordered["proxies"] = proxies
+    cfg = ordered
+
+    provider_keys = set((cfg.get("proxy-providers") or {}).keys())
+    cfg.pop("proxy-providers", None)
+
+    for group in cfg.get("proxy-groups") or []:
+        uses = list(group.get("use") or [])
+        if not uses:
+            continue
+        rest_use = [u for u in uses if u not in provider_keys]
+        if rest_use:
+            group["use"] = rest_use
+        else:
+            group.pop("use", None)
+        existing = [p for p in (group.get("proxies") or []) if p not in names]
+        if group.get("type") == "url-test":
+            group["proxies"] = names or existing or ["DIRECT"]
+        else:
+            group["proxies"] = names + existing if names else (existing or ["DIRECT"])
+    return cfg
 
 
 def dump_yaml(data) -> str:
@@ -260,6 +222,45 @@ def dump_yaml(data) -> str:
         sort_keys=False,
         default_flow_style=False,
     )
+
+
+def dump_flow_item(item: dict) -> str:
+    return yaml.safe_dump(
+        item,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=True,
+        width=10**9,
+    ).strip()
+
+
+def dump_proxies_flow(proxies: list[dict]) -> str:
+    lines = ["proxies:"]
+    if not proxies:
+        lines.append("  []")
+        return "\n".join(lines) + "\n"
+    for item in proxies:
+        lines.append(f"  - {dump_flow_item(item)}")
+    return "\n".join(lines) + "\n"
+
+
+def dump_clash_config(cfg: dict) -> str:
+    proxies = cfg.get("proxies") or []
+    chunks = []
+    wrote_proxies = False
+    for key, value in cfg.items():
+        if key == "proxies":
+            if not wrote_proxies:
+                chunks.append(dump_proxies_flow(proxies).rstrip())
+                wrote_proxies = True
+            continue
+        if key == "proxy-groups" and not wrote_proxies:
+            chunks.append(dump_proxies_flow(proxies).rstrip())
+            wrote_proxies = True
+        chunks.append(dump_yaml({key: value}).rstrip())
+    if not wrote_proxies:
+        chunks.append(dump_proxies_flow(proxies).rstrip())
+    return "\n".join(chunks) + "\n"
 
 
 def to_shadowrocket_uri(p: dict, remark: str) -> str | None:
@@ -360,40 +361,69 @@ def to_shadowrocket_uri(p: dict, remark: str) -> str | None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Clash 节点入口 IP 住宅过滤 → 小火箭订阅")
-    parser.add_argument("inputs", nargs="*", type=Path, help="Clash YAML，默认 refer/clash_*.yaml")
+    parser = argparse.ArgumentParser(description="Clash 节点入口 IP 住宅过滤 → 小火箭/Clash Meta")
+    parser.add_argument(
+        "--select-dir",
+        type=Path,
+        default=SELECT_DIR,
+        help="需要 IP 筛选的 YAML 目录",
+    )
+    parser.add_argument(
+        "--fix-dir",
+        type=Path,
+        default=FIX_DIR,
+        help="不筛选、全部保留的 YAML 目录",
+    )
     parser.add_argument("-o", "--out-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--sleep", type=float, default=1.5, help="ip-api 请求间隔（秒）")
     parser.add_argument("--keep-unknown", action="store_true", help="查询失败的节点也保留")
     return parser.parse_args()
 
 
+def collect_proxies(path: Path, seen: set) -> list[dict]:
+    out = []
+    for p in load_proxies(path):
+        name = str(p.get("name") or "")
+        if SKIP_NAME.search(name) or is_xhttp(p):
+            continue
+        key = proxy_key(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def keep_proxy(p: dict, kind: str, keep_unknown: bool) -> bool:
+    if p.get("_always_keep"):
+        return True
+    return kind == "residential" or (keep_unknown and kind == "unknown")
+
+
 def main() -> int:
     args = parse_args()
-    inputs = args.inputs
-    if not inputs:
-        inputs = sorted((ROOT / "refer").glob("clash_*.yaml"))
-    if not inputs:
-        print("没有输入文件。用法: python tools/filter_residential.py refer/clash_simple.yaml")
+    select_files = iter_yaml_files(args.select_dir)
+    fix_files = iter_yaml_files(args.fix_dir)
+    if not select_files and not fix_files:
+        print(f"没有输入文件。请把 YAML 放到 {args.select_dir} 或 {args.fix_dir}")
         return 1
 
-    proxies: list[dict] = []
-    seen = set()
-    for path in inputs:
-        if not path.exists():
-            print(f"跳过不存在: {path}")
-            continue
-        for p in load_proxies(path):
-            name = str(p.get("name") or "")
-            if SKIP_NAME.search(name):
-                continue
-            key = proxy_key(p)
-            if key in seen:
-                continue
-            seen.add(key)
-            proxies.append(p)
+    seen: set = set()
+    select_proxies: list[dict] = []
+    for path in select_files:
+        select_proxies.extend(collect_proxies(path, seen))
 
-    print(f"去重后节点 {len(proxies)} 个（来自 {len(inputs)} 个文件）")
+    fix_proxies: list[dict] = []
+    for path in fix_files:
+        for p in collect_proxies(path, seen):
+            p["_always_keep"] = True
+            fix_proxies.append(p)
+
+    proxies = select_proxies + fix_proxies
+    print(
+        f"待处理 {len(proxies)} 个（筛选 {len(select_proxies)} / "
+        f"固定 {len(fix_proxies)}；xhttp 与套餐信息节点已跳过）"
+    )
     print("注意: 分类的是入口 server IP，中转节点入口多为机房，不等于落地住宅。")
 
     cache = load_cache()
@@ -410,8 +440,9 @@ def main() -> int:
         info = lookup_ip(ip, cache, args.sleep) if ip else {"status": "fail", "message": "dns"}
         kind = classify(info)
         country = info.get("countryCode") or "XX"
+        tag = "fix" if p.get("_always_keep") else "select"
         print(
-            f"[{i}/{len(proxies)}] {kind:12s} {country:2s} {ip or '-':15s} "
+            f"[{i}/{len(proxies)}] {tag:6s} {kind:12s} {country:2s} {ip or '-':15s} "
             f"{info.get('isp') or info.get('message') or ''}  |  {p.get('name')}"
         )
         row = {
@@ -429,11 +460,16 @@ def main() -> int:
             "hosting": bool(info.get("hosting")),
             "proxy": bool(info.get("proxy")),
             "mobile": bool(info.get("mobile")),
+            "fixed": bool(p.get("_always_keep")),
         }
-        keep = kind == "residential" or (args.keep_unknown and kind == "unknown")
-        if keep:
+        if keep_proxy(p, kind, args.keep_unknown):
             counters[country] += 1
-            label = new_label(country, counters[country], str(p.get("name") or ""))
+            label = new_label(
+                country,
+                counters[country],
+                str(p.get("_stem") or "node"),
+                str(p.get("name") or ""),
+            )
             row["new_name"] = label
             uri = to_shadowrocket_uri(p, label)
             kept.append(
@@ -476,16 +512,15 @@ def main() -> int:
 
     clash_proxies = [item["proxy"] for item in kept]
     proxies_yaml = clash_dir / "proxies.yaml"
-    config_yaml = clash_dir / "config.yaml"
-    proxies_yaml.write_text(dump_yaml({"proxies": clash_proxies}), encoding="utf-8")
-    config_yaml.write_text(dump_yaml(build_clash_config(clash_proxies)), encoding="utf-8")
+    stamp = datetime.date.today().strftime("%m%d")
+    config_yaml = clash_dir / f"ai{stamp}.yaml"
+    proxies_yaml.write_text(dump_proxies_flow(clash_proxies), encoding="utf-8")
+    config_yaml.write_text(dump_clash_config(build_clash_config(clash_proxies)), encoding="utf-8")
 
-    print(f"\n住宅/ISP: {len(kept)} / {len(proxies)}")
+    print(f"\n输出节点: {len(kept)} / {len(proxies)}")
     print(f"小火箭订阅: {sub_txt}")
     print(f"Clash Meta 完整配置: {config_yaml}")
     print(f"Clash 仅节点: {proxies_yaml}")
-    print("Clash Verge / Meta：Profiles → Import → 选 config.yaml")
-    print("或把 proxies.yaml 拷到 clash/ 后导入仓库里的 clash/ai.yaml")
     return 0
 
 
