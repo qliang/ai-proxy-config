@@ -1,0 +1,123 @@
+# Clash Meta：规则骨架（不含节点密钥）
+# 用法：把 filter 生成的 dist/clash/proxies.yaml 放到同目录，再导入本文件；
+# 或直接用脚本生成的 dist/clash/config.yaml（节点+规则已合并）。
+
+mixed-port: 7890
+allow-lan: false
+bind-address: '*'
+mode: rule
+log-level: info
+ipv6: false
+external-controller: 127.0.0.1:9090
+
+tun:
+  enable: true
+  stack: mixed
+  dns-hijack:
+    - any:53
+  auto-route: true
+  auto-detect-interface: true
+
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  use-hosts: true
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+    - https://dns.alidns.com/dns-query
+  fallback:
+    - 8.8.8.8
+    - 1.1.1.1
+    - https://1.1.1.1/dns-query
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 240.0.0.0/4
+
+proxy-providers:
+  residential:
+    type: file
+    path: ./proxies.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+
+proxy-groups:
+  - name: 手动选择
+    type: select
+    use:
+      - residential
+    proxies:
+      - DIRECT
+
+  - name: 自动选择
+    type: url-test
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+    use:
+      - residential
+
+  - name: AI
+    type: select
+    proxies:
+      - 手动选择
+      - 自动选择
+      - DIRECT
+    use:
+      - residential
+
+rule-providers:
+  advertising:
+    type: http
+    behavior: domain
+    format: text
+    url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/AdvertisingLite/AdvertisingLite_Domain.txt
+    path: ./ruleset/advertising.txt
+    interval: 86400
+
+  ai:
+    type: http
+    behavior: classical
+    format: yaml
+    url: https://cdn.jsdelivr.net/gh/VPSDance/ai-proxy-rules@main/rules/clash/global.yaml
+    path: ./ruleset/ai.yaml
+    interval: 86400
+
+  proxy:
+    type: http
+    behavior: classical
+    format: yaml
+    url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/Global/Global.yaml
+    path: ./ruleset/global.yaml
+    interval: 86400
+
+  lan:
+    type: http
+    behavior: classical
+    format: yaml
+    url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/Lan/Lan.yaml
+    path: ./ruleset/lan.yaml
+    interval: 86400
+
+  cn:
+    type: http
+    behavior: classical
+    format: yaml
+    url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/China/China.yaml
+    path: ./ruleset/china.yaml
+    interval: 86400
+
+rules:
+  - RULE-SET,advertising,REJECT
+  - RULE-SET,ai,AI
+  - RULE-SET,proxy,手动选择
+  - RULE-SET,lan,DIRECT
+  - RULE-SET,cn,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,手动选择

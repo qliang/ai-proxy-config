@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Generated Clash node list (secrets) if copied next to the template
+clash/proxies.yaml
+clash/ruleset/
+refer/
+
 # C extensions
 *.so
 
@@ -216,3 +221,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local IP lookup cache
+.cache/
+
