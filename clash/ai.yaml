@@ -1,0 +1,192 @@
+# Clash Meta：规则骨架（不含节点密钥）
+# 用法：把本文件放到 Clash 工作目录（如 ~/.config/clash.meta/）；
+# 节点由 python main.py -toclash 写成 ./mine/myproxy.yaml（不自动拉订阅）。
+#
+# DNS / TUN 设计目标：防 DNS 泄露、隐藏 IPv6、降低大陆访问 Claude 时域名查询落到国内 DNS。
+
+# HTTP + SOCKS 混合入站端口
+mixed-port: 7890
+# 不接受局域网设备接入，避免旁路机器误用本机代理
+allow-lan: false
+bind-address: '*'
+mode: rule
+log-level: info
+# 全局关闭 IPv6，避免 AAAA / IPv6 直连绕过代理暴露真实地址
+ipv6: false
+# 控制 API 只绑本机，防止局域网访问 Clash 面板
+external-controller: 127.0.0.1:9090
+
+# Geo 数据库：Clash Meta 始终先读工作目录（-d，如 ~/.config/clash.meta/）里的本地文件
+#   geosite.dat / geoip.dat / geoip.metadb。geox-url 只是「本地没有或到期」时的下载地址，
+#   不是每次启动都联网。不写 geox-url 时内核也有默认源（同样是 MetaCubeX）。
+# 这里显式指定 MetaCubeX 发行版，供 geosite:cn、GEOIP,CN 等规则使用。
+geox-url:
+  geoip: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
+  geosite: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+  mmdb: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb"
+geo-auto-update: true
+# 单位是小时；336 = 14 天。库内容变化慢，两周一次足够，也少打远程 CDN
+geo-update-interval: 336
+
+# TLS 握手伪装成 Chrome，降低被 Cloudflare（Claude CDN）识别为非浏览器客户端的概率
+global-client-fingerprint: chrome
+
+profile:
+  # 重启后记住上次选中的策略组
+  store-selected: true
+  # 持久化 fake-ip 映射，减少重启后域名和假 IP 对不上的问题
+  store-fake-ip: true
+
+# 嗅探 TLS/HTTP/QUIC 的真实域名。部分 App / 浏览器自带 DoH，Clash 拦不到 53 端口时，仍可用 SNI 分流
+sniffer:
+  enable: true
+  # 不改写目标地址，只用于识别域名，减少把连接指错 IP 的副作用
+  override-destination: false
+  sniff:
+    TLS:
+      ports: [443]
+    HTTP:
+      ports: [80]
+    QUIC:
+      ports: [443]
+
+tun:
+  enable: true
+  # macOS 用系统协议栈，性能更好；若仍怀疑 DNS 漏出，可改 mixed
+  stack: system
+  # 劫持所有发往 53 的 DNS（UDP + TCP），避免系统/App 绕过 Clash 直询 ISP DNS
+  dns-hijack:
+    - any:53
+    - tcp://any:53
+  auto-route: true
+  auto-detect-interface: true
+  # 强制流量走 TUN，减少漏网直连
+  strict-route: true
+  # TUN 上禁用 IPv6，与全局 ipv6: false、dns.filter-aaaa 一起挡住 IPv6 泄露
+  disable-ipv6: true
+
+# DNS 查询实际顺序（从上到下读）：
+#   1. TUN 劫持 :53 → 2. 假 IP / 过滤 → 3. 引导解析 DoH 域名
+#   4. 解析节点 hostname → 5. nameserver-policy 命中则用专属 DNS → 6. 否则 nameserver
+# 三套解析器不能全部改成国外：引导和节点必须直连可达，业务（Claude）才走国外 DoH + 代理。
+dns:
+  enable: true
+  ipv6: false
+  # 丢弃 AAAA，应用拿不到 IPv6
+  filter-aaaa: true
+  # 应用只看到假 IP，真实解析留在 Clash 内，避免把真 IP 拿去直连
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  use-hosts: true
+  prefer-h3: false
+  # DNS 出站也走规则，避免国外 DoH 直连 1.1.1.1
+  respect-rules: true
+  # 这些域名返回真 IP。不要加 stun.*，否则 stun.l.google.com 可能按 IP 直连泄露
+  fake-ip-filter:
+    - '*.lan'
+    - '*.local'
+    - 'localhost.ptlogin2.qq.com'
+    - 'dns.msftncsi.com'
+
+  # ① 引导：只解析 DoH 服务器自己的域名（doh.pub 等），不查 claude.ai。必须是 IP 且直连可达
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+
+  # ② 节点：解析代理 hostname。此时代理还没通，必须用国内可达 DoH
+  proxy-server-nameserver:
+    - https://223.5.5.5/dns-query
+    - https://1.12.12.12/dns-query
+
+  # ③ 策略：先于 nameserver 匹配。国内站 / 私有域用国内 DoH 直连（CDN），不含 Claude
+  nameserver-policy:
+    "geosite:private":
+      - https://doh.pub/dns-query
+      - https://dns.alidns.com/dns-query
+    "geosite:cn":
+      - https://doh.pub/dns-query
+      - https://dns.alidns.com/dns-query
+
+  # ④ 默认业务：Claude / GitHub 等。IP 形式 DoH，强制经「手动选择」；不要明文 UDP 8.8.8.8
+  nameserver:
+    - https://1.1.1.1/dns-query#手动选择
+    - https://8.8.8.8/dns-query#手动选择
+
+# 节点与规则分离：type: file 只读本地文件，没有 url / interval，Clash 不会自己拉订阅。
+# path 相对的是 Clash 工作目录（-d，例如 ~/.config/clash.meta/），不是 ai.yaml 所在目录。
+# 列表由 main.py 生成（-toclash 只覆盖 mine/myproxy.yaml，ai.yaml 需自行放到工作目录）。
+# health-check 只测延迟，不更新节点内容。
+proxy-providers:
+  residential:
+    type: file
+    path: ./mine/myproxy.yaml
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+
+proxy-groups:
+  - name: 手动选择
+    type: select
+    use:
+      - residential
+    proxies:
+      - DIRECT
+
+  - name: 自动选择
+    type: url-test
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+    use:
+      - residential
+
+rule-providers:
+  advertising:
+    type: http
+    behavior: domain
+    format: text
+    url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/AdvertisingLite/AdvertisingLite_Domain.txt
+    path: ./ruleset/advertising.txt
+    interval: 86400
+
+  ai:
+    type: http
+    behavior: classical
+    format: yaml
+    url: https://cdn.jsdelivr.net/gh/VPSDance/ai-proxy-rules@main/rules/clash/global.yaml
+    path: ./ruleset/ai.yaml
+    interval: 86400
+
+  proxy:
+    type: http
+    behavior: classical
+    format: yaml
+    url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/Global/Global.yaml
+    path: ./ruleset/global.yaml
+    interval: 86400
+
+  lan:
+    type: http
+    behavior: classical
+    format: yaml
+    url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/Lan/Lan.yaml
+    path: ./ruleset/lan.yaml
+    interval: 86400
+
+  cn:
+    type: http
+    behavior: classical
+    format: yaml
+    url: https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Clash/China/China.yaml
+    path: ./ruleset/china.yaml
+    interval: 86400
+
+rules:
+  - RULE-SET,advertising,REJECT
+  - RULE-SET,ai,手动选择
+  - RULE-SET,proxy,手动选择
+  - RULE-SET,lan,DIRECT
+  - RULE-SET,cn,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,手动选择

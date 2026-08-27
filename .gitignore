@@ -1,0 +1,12 @@
+.cache/
+dist/clash/*
+!dist/clash/.gitkeep
+dist/shadowrocket/*
+!dist/shadowrocket/.gitkeep
+refer/proxy_fix/*
+!refer/proxy_fix/.gitkeep
+refer/proxy_select/*
+!refer/proxy_select/.gitkeep
+__pycache__/
+*.pyc
+.DS_Store
