@@ -130,15 +130,13 @@ proxy-groups:
     type: select
     use:
       - residential
-    proxies:
-      - DIRECT
+    # # proxies:
+    #   - DIRECT
 
-  - name: AI专用
-    type: select
-    use:
-      - residential
-    proxies:
-      - DIRECT
+  # - name: AI专用
+  #   type: select
+  #   use:
+  #     - residential
 
 rule-providers:
   advertising:
@@ -183,7 +181,8 @@ rule-providers:
 
 rules:
   - RULE-SET,advertising,REJECT
-  - RULE-SET,ai,AI专用
+  - RULE-SET,ai,手动选择
+  # - RULE-SET,ai,AI专用
   - RULE-SET,proxy,手动选择
   - RULE-SET,lan,DIRECT
   - RULE-SET,cn,DIRECT
