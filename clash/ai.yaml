@@ -1,6 +1,7 @@
 # Clash Meta：规则骨架（不含节点密钥）
-# 用法：把本文件放到 Clash 工作目录（如 ~/.config/clash.meta/）；
+# 用法：把本文件和 mine/myrule.txt 放到 Clash 工作目录（如 ~/.config/clash.meta/）；
 # 节点由 python main.py -toclash 写成 ./mine/myproxy.yaml（不自动拉订阅）。
+# 自定义直连只改 mine/myrule.txt，不要在 nameserver-policy / rules 里逐条加。
 #
 # DNS / TUN 设计目标：防 DNS 泄露、隐藏 IPv6、降低大陆访问 Claude 时域名查询落到国内 DNS。
 
@@ -99,11 +100,15 @@ dns:
     - https://1.12.12.12/dns-query
 
   # ③ 策略：先于 nameserver 匹配。国内站 / 私有域用国内 DoH 直连（CDN），不含 Claude
+  # 自定义直连域名走同一套国内 DoH；规则本身写在 ./mine/myrule.txt
   nameserver-policy:
     "geosite:private":
       - https://doh.pub/dns-query
       - https://dns.alidns.com/dns-query
     "geosite:cn":
+      - https://doh.pub/dns-query
+      - https://dns.alidns.com/dns-query
+    "rule-set:myrule":
       - https://doh.pub/dns-query
       - https://dns.alidns.com/dns-query
 
@@ -139,6 +144,13 @@ proxy-groups:
   #     - residential
 
 rule-providers:
+  # 本地文件，无 url / interval；path 相对 Clash 工作目录
+  myrule:
+    type: file
+    behavior: classical
+    format: text
+    path: ./mine/myrule.txt
+
   advertising:
     type: http
     behavior: domain
@@ -180,6 +192,8 @@ rule-providers:
     interval: 86400
 
 rules:
+  # 自定义直连：必须写在 ai / proxy 规则集之前，否则可能被 Global 规则先匹配走代理
+  - RULE-SET,myrule,DIRECT
   - RULE-SET,advertising,REJECT
   - RULE-SET,ai,手动选择
   # - RULE-SET,ai,AI专用

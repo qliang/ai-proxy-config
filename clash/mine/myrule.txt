@@ -1,0 +1,8 @@
+# 自定义直连名单（一行一条）。改完拷到 Clash 工作目录后再重载，例如：
+#   ~/.config/clash.meta/mine/myrule.txt
+#
+# 域名：DOMAIN-SUFFIX 匹配自身及所有子域
+# IP：IP-CIDR，单 IP 写 /32；IPv6 用 IP-CIDR6
+DOMAIN-SUFFIX,bilibili.com
+# IP-CIDR,1.2.3.4/32
+# IP-CIDR6,2001:db8::/32
